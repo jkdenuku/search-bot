@@ -9,6 +9,7 @@
   テキストがある程度の長さを持つものを結果候補として返す(簡易版)
 """
 
+import re
 import urllib.parse
 from dataclasses import dataclass
 from typing import List, Optional
@@ -23,6 +24,7 @@ USER_AGENT = (
 )
 
 REQUEST_TIMEOUT = 10
+DETAIL_PAGE_TIMEOUT = 8  # viewkeyページ個別アクセス時のタイムアウト(短め)
 MAX_RESULTS = 5
 MAX_IMAGES = 5
 MAX_VIEWKEY_LINKS = 5
@@ -31,11 +33,28 @@ MIN_LINK_TEXT_LEN = 4  # 簡易抽出時、これより短いテキストのリ�
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg")
 VIEWKEY_MARKER = "viewkey="
 
+# flashvars_XXXXX = { ... }; ブロックを検出する正規表現
+FLASHVARS_BLOCK_RE = re.compile(r"var\s+flashvars_\w+\s*=\s*(\{.*?\});", re.DOTALL)
+
+# タイトルとして使う候補キー(見つかった順に採用)
+TITLE_KEYS = ("video_title", "title", "video_name")
+
+# サムネイルとして使う候補キー(見つかった順に採用)
+THUMBNAIL_KEYS = (
+    "image_url",
+    "thumb",
+    "thumbnail",
+    "preview_url",
+    "image_url_str",
+    "thumbUrl",
+)
+
 
 @dataclass
 class SearchResult:
     title: str
     url: str
+    thumbnail: Optional[str] = None
 
 
 @dataclass
@@ -164,12 +183,67 @@ def _extract_images(soup: BeautifulSoup, base_url: str) -> List[str]:
     return images
 
 
+def _parse_flashvars(html_text: str) -> dict:
+    """
+    HTMLソース中の 'var flashvars_XXXXX = { ... };' ブロックを探し、
+    中身をざっくり dict として取り出す(厳密なJSではないため正規表現で個別キーを拾う)。
+    """
+    match = FLASHVARS_BLOCK_RE.search(html_text)
+    if not match:
+        return {}
+
+    block = match.group(1)
+    result = {}
+
+    # "key": "value" または 'key': 'value' の形式を拾う
+    for m in re.finditer(r'["\']([\w]+)["\']\s*:\s*["\']([^"\']*)["\']', block):
+        key, value = m.group(1), m.group(2)
+        result[key] = value
+
+    return result
+
+
+def _fetch_viewkey_detail(url: str) -> tuple:
+    """
+    viewkey= を含むページ個別にアクセスし、flashvars からタイトルとサムネイルを取得する。
+    取得できなければ (None, None) を返す(呼び出し側でフォールバック処理する)。
+    """
+    try:
+        response = requests.get(
+            url,
+            headers={"User-Agent": USER_AGENT},
+            timeout=DETAIL_PAGE_TIMEOUT,
+        )
+        response.raise_for_status()
+    except requests.RequestException:
+        return None, None
+
+    flashvars = _parse_flashvars(response.text)
+    if not flashvars:
+        return None, None
+
+    title = None
+    for key in TITLE_KEYS:
+        if flashvars.get(key):
+            title = flashvars[key]
+            break
+
+    thumbnail = None
+    for key in THUMBNAIL_KEYS:
+        if flashvars.get(key):
+            thumbnail = _resolve_url(url, flashvars[key])
+            break
+
+    return title, thumbnail
+
+
 def _extract_viewkey_links(soup: BeautifulSoup, base_url: str) -> List[SearchResult]:
     """
     ページ内の全リンクから、URLに 'viewkey=' を含むものだけを最大MAX_VIEWKEY_LINKS件抽出する。
-    (例: 動画ページなど特定パラメータを含むURLだけを拾いたい場合に使用)
+    各リンク先ページに個別アクセスし、flashvars から動画タイトルとサムネイルを取得する。
+    取得に失敗した場合は、検索結果ページ上のリンクテキストをタイトルとして使う。
     """
-    results: List[SearchResult] = []
+    candidate_urls: List[tuple] = []  # (url, fallback_title)
     seen_urls = set()
 
     for a_tag in soup.find_all("a", href=True):
@@ -185,11 +259,20 @@ def _extract_viewkey_links(soup: BeautifulSoup, base_url: str) -> List[SearchRes
             continue
         seen_urls.add(full_url)
 
-        title = a_tag.get_text(strip=True) or full_url
-        results.append(SearchResult(title=title, url=full_url))
+        fallback_title = a_tag.get_text(strip=True) or full_url
+        candidate_urls.append((full_url, fallback_title))
 
-        if len(results) >= MAX_VIEWKEY_LINKS:
+        if len(candidate_urls) >= MAX_VIEWKEY_LINKS:
             break
+
+    results: List[SearchResult] = []
+    for url, fallback_title in candidate_urls:
+        title, thumbnail = _fetch_viewkey_detail(url)
+        results.append(SearchResult(
+            title=title or fallback_title,
+            url=url,
+            thumbnail=thumbnail,
+        ))
 
     return results
 
@@ -200,6 +283,9 @@ def search(url_template: str, query: str, selector: Optional[str] = None) -> Sea
     画像URL(最大MAX_IMAGES件)、viewkey=を含むリンク(最大MAX_VIEWKEY_LINKS件)を
     まとめて返す。
     ネットワークエラーやパース失敗時は例外を投げる(呼び出し側でハンドリング)。
+
+    viewkey= を含むリンクについては、各ページに個別アクセスして
+    'var flashvars_XXXXX = {...};' 形式のJS変数からタイトルとサムネイルURLを取得する。
     """
     search_url = build_search_url(url_template, query)
 
