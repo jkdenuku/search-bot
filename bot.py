@@ -161,8 +161,89 @@ bot.tree.add_command(setting_group)
 
 
 # ---------------------------------------------------------------------
-# /search コマンド
+# /search コマンド用: ページネーション表示
 # ---------------------------------------------------------------------
+
+RESULTS_PER_PAGE = scraper.RESULTS_PER_PAGE
+
+
+def build_page_embed(site: str, query: str, links, viewkey_links, page: int, total_pages: int) -> discord.Embed:
+    """
+    リンク結果とviewkeyリンクをまとめて1ページ分のembedを組み立てる。
+    page は0始まり。
+    """
+    start = page * RESULTS_PER_PAGE
+    end = start + RESULTS_PER_PAGE
+
+    page_links = links[start:end]
+    page_viewkey = viewkey_links[start:end]
+
+    embed = discord.Embed(
+        title=f"「{query}」の検索結果 — {site}",
+        color=discord.Color.blue(),
+    )
+
+    if page_links:
+        for r in page_links:
+            title = r.title if len(r.title) <= 100 else r.title[:97] + "..."
+            embed.add_field(name=title, value=r.url, inline=False)
+
+    if page_viewkey:
+        for r in page_viewkey:
+            title = r.title if len(r.title) <= 100 else r.title[:97] + "..."
+            embed.add_field(name=f"🎬 {title}", value=r.url, inline=False)
+        # このページのviewkey結果のうち、サムネイルがあるものを1枚embed画像として表示
+        first_thumb = next((r.thumbnail for r in page_viewkey if r.thumbnail), None)
+        if first_thumb:
+            embed.set_image(url=first_thumb)
+
+    embed.set_footer(text=f"ページ {page + 1} / {total_pages} (最大{scraper.MAX_RESULTS}件まで)")
+
+    return embed
+
+
+class SearchResultsView(discord.ui.View):
+    """検索結果のページ送りボタンを提供するView。実行者本人のみ操作可能。"""
+
+    def __init__(self, author_id: int, site: str, query: str, links, viewkey_links, total_pages: int):
+        super().__init__(timeout=300)  # 5分操作が無ければボタンを無効化
+        self.author_id = author_id
+        self.site = site
+        self.query = query
+        self.links = links
+        self.viewkey_links = viewkey_links
+        self.total_pages = total_pages
+        self.page = 0
+        self._update_button_state()
+
+    def _update_button_state(self):
+        self.prev_button.disabled = self.page <= 0
+        self.next_button.disabled = self.page >= self.total_pages - 1
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("この検索結果はコマンドを実行した本人のみ操作できます。", ephemeral=True)
+            return False
+        return True
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+    @discord.ui.button(label="◀ 前へ", style=discord.ButtonStyle.secondary)
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = max(0, self.page - 1)
+        self._update_button_state()
+        embed = build_page_embed(self.site, self.query, self.links, self.viewkey_links, self.page, self.total_pages)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="次へ ▶", style=discord.ButtonStyle.secondary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = min(self.total_pages - 1, self.page + 1)
+        self._update_button_state()
+        embed = build_page_embed(self.site, self.query, self.links, self.viewkey_links, self.page, self.total_pages)
+        await interaction.response.edit_message(embed=embed, view=self)
+
 
 @bot.tree.command(name="search", description="登録済みサイト内をキーワード検索します")
 @app_commands.describe(site="検索対象のサイト(登録済みのものから選択)", query="検索キーワード")
@@ -179,7 +260,8 @@ async def search_command(interaction: discord.Interaction, site: str, query: str
         )
         return
 
-    await interaction.response.defer()
+    # 本人にしか見えない応答にする
+    await interaction.response.defer(ephemeral=True)
 
     try:
         response = scraper.search(
@@ -188,50 +270,41 @@ async def search_command(interaction: discord.Interaction, site: str, query: str
             selector=site_conf.get("selector"),
         )
     except Exception as e:
-        await interaction.followup.send(f"検索中にエラーが発生しました: `{e}`")
+        await interaction.followup.send(f"検索中にエラーが発生しました: `{e}`", ephemeral=True)
         return
 
     links = response.links
-    images = response.images
     viewkey_links = response.viewkey_links
+    images = response.images
 
-    if not links and not images and not viewkey_links:
-        await interaction.followup.send(f"「{query}」の検索結果が見つかりませんでした。(サイト: {site})")
+    if not links and not viewkey_links and not images:
+        await interaction.followup.send(f"「{query}」の検索結果が見つかりませんでした。(サイト: {site})", ephemeral=True)
         return
 
-    # --- リンク結果(最大5件)を1つのembedで表示 ---
-    if links:
-        embed = discord.Embed(
-            title=f"「{query}」の検索結果 — {site}",
-            color=discord.Color.blue(),
-        )
-        for r in links:
-            title = r.title if len(r.title) <= 100 else r.title[:97] + "..."
-            embed.add_field(name=title, value=r.url, inline=False)
-        await interaction.followup.send(embed=embed)
+    # リンクとviewkeyリンクをページ分けして表示(1ページ5件ずつ)
+    total_items = max(len(links), len(viewkey_links))
+    total_pages = max(1, (total_items + RESULTS_PER_PAGE - 1) // RESULTS_PER_PAGE)
 
-    # --- viewkey= を含むリンク(最大5件)を専用embedで、タイトル・サムネイル付きで表示 ---
-    for i, r in enumerate(viewkey_links, start=1):
-        title = r.title if len(r.title) <= 256 else r.title[:253] + "..."
-        vk_embed = discord.Embed(
-            title=title,
-            url=r.url,
-            description=r.url,
-            color=discord.Color.orange(),
-        )
-        if r.thumbnail:
-            vk_embed.set_thumbnail(url=r.thumbnail)
-        vk_embed.set_footer(text=f"{i}/{len(viewkey_links)} — {site}")
-        await interaction.followup.send(embed=vk_embed)
+    view = SearchResultsView(
+        author_id=interaction.user.id,
+        site=site,
+        query=query,
+        links=links,
+        viewkey_links=viewkey_links,
+        total_pages=total_pages,
+    )
+    embed = build_page_embed(site, query, links, viewkey_links, page=0, total_pages=total_pages)
 
-    # --- 画像結果(最大5件)を1枚ずつ別embedで連続投稿 ---
+    await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+    # --- 画像結果(最大150件)を、見つかった分だけ本人にのみ見える形で連続送信 ---
     for i, image_url in enumerate(images, start=1):
         image_embed = discord.Embed(
             title=f"関連画像 {i}/{len(images)}",
             color=discord.Color.green(),
         )
         image_embed.set_image(url=image_url)
-        await interaction.followup.send(embed=image_embed)
+        await interaction.followup.send(embed=image_embed, ephemeral=True)
 
 
 @search_command.autocomplete("site")
