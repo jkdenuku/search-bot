@@ -9,14 +9,24 @@
 
 必要な環境変数:
   DISCORD_BOT_TOKEN : Discord Developer Portalで発行したBotトークン
+  PORT              : (Render Web Service用) ヘルスチェック用HTTPサーバーの待受ポート。
+                       Renderが自動的に設定するので通常は手動設定不要。
 
 起動方法:
   pip install -r requirements.txt
   export DISCORD_BOT_TOKEN="your-token-here"
   python bot.py
+
+補足:
+  Render の Web Service で動かす場合、HTTPポートを開いてヘルスチェックに
+  応答する必要があるため、discordのBotとは別にダミーのHTTPサーバーを
+  同じプロセス内で並行起動しています(下部の run_web_server 参照)。
 """
 
 import os
+import asyncio
+
+from aiohttp import web
 
 import discord
 from discord import app_commands
@@ -28,6 +38,27 @@ import scraper
 INTENTS = discord.Intents.default()
 
 bot = commands.Bot(command_prefix="!", intents=INTENTS)
+
+
+# ---------------------------------------------------------------------
+# Render の Web Service 用ヘルスチェックサーバー
+# (Discord Botとは無関係。Renderがポートを検知できるようにするためだけの処理)
+# ---------------------------------------------------------------------
+
+async def handle_health_check(request):
+    return web.Response(text="Bot is running")
+
+
+async def run_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_health_check)
+
+    port = int(os.environ.get("PORT", 8080))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host="0.0.0.0", port=port)
+    await site.start()
+    print(f"ヘルスチェック用サーバーをポート {port} で起動しました")
 
 
 @bot.event
@@ -188,11 +219,19 @@ async def search_site_autocomplete(interaction: discord.Interaction, current: st
     ][:25]
 
 
-if __name__ == "__main__":
+async def main():
     token = os.environ.get("DISCORD_BOT_TOKEN")
     if not token:
         raise SystemExit(
             "環境変数 DISCORD_BOT_TOKEN が設定されていません。\n"
             "export DISCORD_BOT_TOKEN=\"your-token-here\" を実行してから再度起動してください。"
         )
-    bot.run(token)
+
+    # ヘルスチェック用サーバーとDiscord Botを同時に起動する
+    await run_web_server()
+    async with bot:
+        await bot.start(token)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
