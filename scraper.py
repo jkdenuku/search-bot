@@ -183,6 +183,26 @@ def _extract_images(soup: BeautifulSoup, base_url: str) -> List[str]:
     return images
 
 
+def _find_image_url_in_flashvars(flashvars: dict) -> Optional[str]:
+    """
+    flashvars の中身から、値が画像URL(.jpg/.jpeg/.png/.webp等で終わる)になっている
+    ものをキー名に関わらず探す。優先度の高いキー名から先にチェックし、
+    見つからなければ全キーを走査する。
+    """
+    # まず候補キー名を優先的にチェック
+    for key in THUMBNAIL_KEYS:
+        value = flashvars.get(key)
+        if value and _is_image_url(value):
+            return value
+
+    # 候補キーで見つからなければ、全キーの値から画像URLっぽいものを探す
+    for value in flashvars.values():
+        if isinstance(value, str) and _is_image_url(value):
+            return value
+
+    return None
+
+
 def _parse_flashvars(html_text: str) -> dict:
     """
     HTMLソース中の 'var flashvars_XXXXX = { ... };' ブロックを探し、
@@ -233,6 +253,12 @@ def _fetch_viewkey_detail(url: str) -> tuple:
         if flashvars.get(key):
             thumbnail = _resolve_url(url, flashvars[key])
             break
+
+    # 候補キー名で見つからなければ、値が.jpg等で終わるものをキー名問わず探す
+    if not thumbnail:
+        image_value = _find_image_url_in_flashvars(flashvars)
+        if image_value:
+            thumbnail = _resolve_url(url, image_value)
 
     return title, thumbnail
 
@@ -306,7 +332,18 @@ def search(url_template: str, query: str, selector: Optional[str] = None) -> Sea
     else:
         links = _extract_generic(soup, search_url)
 
-    images = _extract_images(soup, search_url)
+    # 一覧ページ自体の<img>タグからも画像を拾う(取れれば)
+    page_images = _extract_images(soup, search_url)
+
     viewkey_links = _extract_viewkey_links(soup, search_url)
+
+    # viewkeyリンクの詳細ページから取得したサムネイル画像もimagesに合流させる
+    # (一覧ページに画像が無いサイトでもここで画像が取れる)
+    viewkey_thumbnails = [r.thumbnail for r in viewkey_links if r.thumbnail]
+
+    images = page_images.copy()
+    for thumb in viewkey_thumbnails:
+        if thumb not in images and len(images) < MAX_IMAGES:
+            images.append(thumb)
 
     return SearchResponse(links=links, images=images, viewkey_links=viewkey_links)
