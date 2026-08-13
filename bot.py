@@ -180,8 +180,10 @@ def _truncate(text: str, max_len: int) -> str:
 
 def _build_links_table_embeds(query: str, site: str, links: list) -> list:
     """
-    通常のリンク結果を「番号. タイトル - URL」の表形式テキストにまとめ、
+    通常のリンク結果を、コードブロックで罫線を揃えた「表」形式にまとめ、
     LINKS_PER_EMBED件ごとに分割して複数のembedを作る。
+    (Discordのembedには本物の表機能が無いため、等幅フォントのコードブロックで
+    列を揃えることで表らしく見せている)
     """
     embeds = []
     total = len(links)
@@ -191,14 +193,23 @@ def _build_links_table_embeds(query: str, site: str, links: list) -> list:
         start = chunk_index * LINKS_PER_EMBED
         chunk = links[start:start + LINKS_PER_EMBED]
 
-        lines = []
+        # 番号の桁数をこのチャンク内の最大値に合わせて揃える
+        no_width = len(str(start + len(chunk)))
+
+        table_lines = []
         for i, r in enumerate(chunk, start=start + 1):
-            title = _truncate(r.title, 60)
-            lines.append(f"**{i}.** {title}\n{r.url}")
+            title = _truncate(r.title, 40)
+            no = str(i).rjust(no_width)
+            table_lines.append(f"{no}. {title}")
+            table_lines.append(f"{' ' * (no_width + 2)}{r.url}")
+
+        table_text = "\n".join(table_lines)
+        # コードブロックはDiscordのembed description上限(4096)に収まるよう分割済み
+        description = f"```\n{table_text}\n```"
 
         embed = discord.Embed(
             title=f"🔗 「{query}」の検索結果 — {site}",
-            description="\n\n".join(lines),
+            description=description,
             color=discord.Color.blue(),
         )
         embed.set_footer(text=f"リンク {start + 1}〜{start + len(chunk)} / {total}件")
