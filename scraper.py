@@ -16,7 +16,6 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 import aiohttp
-import requests
 from bs4 import BeautifulSoup
 
 USER_AGENT = (
@@ -289,10 +288,10 @@ async def _fetch_viewkey_details(candidates: List[tuple]) -> List[SearchResult]:
     return results
 
 
-def _extract_viewkey_links(soup: BeautifulSoup, base_url: str) -> List[SearchResult]:
+async def _extract_viewkey_links(soup: BeautifulSoup, base_url: str) -> List[SearchResult]:
     """
     ページ内の全リンクから、URLに 'viewkey=' を含むものだけを最大MAX_VIEWKEY_LINKS件抽出し、
-    そのうち先頭DETAIL_FETCH_LIMIT件について、それぞれのページに個別アクセスして
+    そのうち先頭DETAIL_FETCH_LIMIT件について、それぞれのページに個別・並行アクセスして
     そのリンク自身のタイトル・サムネイルを取得する。
     (リンクと画像・タイトルが必ず1対1で対応するようにするため、使い回しはしない)
     残りの件数は、検索結果ページ上のリンクテキストのみをタイトルとして使う(画像なし)。
@@ -304,7 +303,7 @@ def _extract_viewkey_links(soup: BeautifulSoup, base_url: str) -> List[SearchRes
     detail_targets = candidates[:DETAIL_FETCH_LIMIT]
     remaining = candidates[DETAIL_FETCH_LIMIT:]
 
-    results = asyncio.run(_fetch_viewkey_details(detail_targets))
+    results = await _fetch_viewkey_details(detail_targets)
 
     for url, fallback_title in remaining:
         results.append(SearchResult(title=fallback_title or url, url=url, thumbnail=None))
@@ -312,24 +311,29 @@ def _extract_viewkey_links(soup: BeautifulSoup, base_url: str) -> List[SearchRes
     return results
 
 
-def search(url_template: str, query: str, selector: Optional[str] = None) -> SearchResponse:
+async def search(url_template: str, query: str, selector: Optional[str] = None) -> SearchResponse:
     """
     サイト内検索を実行し、検索結果ページ1枚分から、リンク結果・画像URLを取得する。
     viewkey= を含むリンクについては、各ページに個別・並行アクセスして
     'var flashvars_XXXXX = {...};' からそのリンク自身のタイトルとサムネイルを取得する
     (リンクごとに個別取得するため、画像やタイトルが別のリンクのものと混ざることはない)。
     ネットワークエラーやパース失敗時は例外を投げる(呼び出し側でハンドリング)。
+
+    discord.py のイベントループ内から呼ばれるため、この関数自体は async def にしている。
+    (内部で asyncio.run() は使わない — 実行中のループの中では呼べないため)
     """
     search_url = build_search_url(url_template, query)
 
-    response = requests.get(
-        search_url,
-        headers={"User-Agent": USER_AGENT},
-        timeout=REQUEST_TIMEOUT,
-    )
-    response.raise_for_status()
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            search_url,
+            headers={"User-Agent": USER_AGENT},
+            timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
+        ) as resp:
+            resp.raise_for_status()
+            html_text = await resp.text(errors="ignore")
 
-    soup = BeautifulSoup(response.text, "html.parser")
+    soup = BeautifulSoup(html_text, "html.parser")
 
     if selector:
         links = _extract_with_selector(soup, selector, search_url)
@@ -342,7 +346,7 @@ def search(url_template: str, query: str, selector: Optional[str] = None) -> Sea
     # 一覧ページ自体の<img>タグからも画像を拾う(取れれば)
     page_images = _extract_images(soup, search_url)
 
-    viewkey_links = _extract_viewkey_links(soup, search_url)
+    viewkey_links = await _extract_viewkey_links(soup, search_url)
 
     # viewkeyリンクの詳細ページから取得したサムネイル画像もimagesに合流させる
     # (一覧ページに画像が無いサイトでもここで画像が取れる)
