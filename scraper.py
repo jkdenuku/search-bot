@@ -24,6 +24,13 @@ USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
+COMMON_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+    "Connection": "keep-alive",
+}
+
 REQUEST_TIMEOUT = 10
 DETAIL_PAGE_TIMEOUT = 8
 DETAIL_FETCH_CONCURRENCY = 8  # 詳細ページに同時アクセスする最大数
@@ -241,7 +248,7 @@ async def _fetch_one_detail(session: "aiohttp.ClientSession", url: str, semaphor
         try:
             async with session.get(
                 url,
-                headers={"User-Agent": USER_AGENT},
+                headers=COMMON_HEADERS,
                 timeout=aiohttp.ClientTimeout(total=DETAIL_PAGE_TIMEOUT),
             ) as resp:
                 if resp.status != 200:
@@ -327,9 +334,13 @@ async def search(url_template: str, query: str, selector: Optional[str] = None) 
     async with aiohttp.ClientSession() as session:
         async with session.get(
             search_url,
-            headers={"User-Agent": USER_AGENT},
+            headers=COMMON_HEADERS,
             timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
         ) as resp:
+            if resp.status == 410:
+                raise RuntimeError(
+                    f"検索先のURLが無効です(410 Gone)。登録した検索URLの形式が正しいか確認してください: {search_url}"
+                )
             resp.raise_for_status()
             html_text = await resp.text(errors="ignore")
 
