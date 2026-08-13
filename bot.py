@@ -163,13 +163,48 @@ bot.tree.add_command(setting_group)
 # ---------------------------------------------------------------------
 # /search コマンド
 #
-# 表示はシンプルに3つ、上から順番に投稿するだけ:
-#   1. 通常のリンク結果(最大5件)を1つのembedで表示
-#   2. viewkey= を含む動画があれば、1件ずつタイトル・サムネイル付きのembedで表示(最大5件)
-#   3. 一覧ページ内で見つかった画像があれば、1枚ずつembedで表示(最大5件)
+# 表示は3種類:
+#   1. 通常のリンク結果(最大150件)を「表」形式のテキストにまとめて表示
+#      (Discordの1embedの文字数制限があるため、必要に応じて複数embedに分割)
+#   2. viewkey= を含む動画があれば、1件ずつタイトル・サムネイル付きのembedで表示(最大150件)
+#   3. 一覧ページ内で見つかった画像があれば、1枚ずつembedで表示(最大150件)
 # ---------------------------------------------------------------------
 
-DISPLAY_LIMIT = 5  # 各カテゴリの表示件数上限
+DISPLAY_LIMIT = 150          # 各カテゴリの表示件数上限
+LINKS_PER_EMBED = 15         # リンク一覧embed 1通あたりに詰め込む件数(文字数制限対策)
+
+
+def _truncate(text: str, max_len: int) -> str:
+    return text if len(text) <= max_len else text[: max_len - 3] + "..."
+
+
+def _build_links_table_embeds(query: str, site: str, links: list) -> list:
+    """
+    通常のリンク結果を「番号. タイトル - URL」の表形式テキストにまとめ、
+    LINKS_PER_EMBED件ごとに分割して複数のembedを作る。
+    """
+    embeds = []
+    total = len(links)
+    total_chunks = (total + LINKS_PER_EMBED - 1) // LINKS_PER_EMBED
+
+    for chunk_index in range(total_chunks):
+        start = chunk_index * LINKS_PER_EMBED
+        chunk = links[start:start + LINKS_PER_EMBED]
+
+        lines = []
+        for i, r in enumerate(chunk, start=start + 1):
+            title = _truncate(r.title, 60)
+            lines.append(f"**{i}.** {title}\n{r.url}")
+
+        embed = discord.Embed(
+            title=f"🔗 「{query}」の検索結果 — {site}",
+            description="\n\n".join(lines),
+            color=discord.Color.blue(),
+        )
+        embed.set_footer(text=f"リンク {start + 1}〜{start + len(chunk)} / {total}件")
+        embeds.append(embed)
+
+    return embeds
 
 
 @bot.tree.command(name="search", description="登録済みサイト内をキーワード検索します")
@@ -208,18 +243,11 @@ async def search_command(interaction: discord.Interaction, site: str, query: str
         await interaction.followup.send(f"「{query}」の検索結果が見つかりませんでした。(サイト: {site})", ephemeral=True)
         return
 
-    # --- 1. 通常のリンク結果(最大5件)を1つのembedで表示 ---
-    if links:
-        embed = discord.Embed(
-            title=f"「{query}」の検索結果 — {site}",
-            color=discord.Color.blue(),
-        )
-        for r in links:
-            title = r.title if len(r.title) <= 100 else r.title[:97] + "..."
-            embed.add_field(name=title, value=r.url, inline=False)
+    # --- 1. 通常のリンク結果(最大150件)を表形式でまとめて表示 ---
+    for embed in _build_links_table_embeds(query, site, links):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    # --- 2. viewkey動画(最大5件)を1件ずつ、タイトル・サムネイル付きで表示 ---
+    # --- 2. viewkey動画(最大150件)を1件ずつ、タイトル・サムネイル付きで表示 ---
     for i, v in enumerate(videos, start=1):
         title = v.title if len(v.title) <= 256 else v.title[:253] + "..."
         video_embed = discord.Embed(
@@ -233,7 +261,7 @@ async def search_command(interaction: discord.Interaction, site: str, query: str
         video_embed.set_footer(text=f"{i}/{len(videos)} — {site}")
         await interaction.followup.send(embed=video_embed, ephemeral=True)
 
-    # --- 3. 画像(最大5件)を1枚ずつ表示 ---
+    # --- 3. 画像(最大150件)を1枚ずつ表示 ---
     for i, image_url in enumerate(images, start=1):
         image_embed = discord.Embed(
             title=f"関連画像 {i}/{len(images)}",
