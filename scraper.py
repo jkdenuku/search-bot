@@ -36,11 +36,11 @@ USER_AGENT = (
 
 REQUEST_TIMEOUT = 10       # 検索結果ページ取得のタイムアウト(秒)
 DETAIL_TIMEOUT = 8         # viewkey詳細ページ取得のタイムアウト(秒)
-DETAIL_FETCH_LIMIT = 5     # viewkey詳細ページを個別取得する最大件数(表示件数と合わせる)
+DETAIL_FETCH_LIMIT = 150   # viewkey詳細ページを個別取得する最大件数
 
-MAX_LINKS = 30              # 通常のリンク結果の取得上限(表示は5件のみ使用)
-MAX_IMAGES = 10              # 一覧ページから拾う画像の取得上限(表示は5件のみ使用)
-MAX_VIEWKEY_LINKS = 5        # viewkeyリンクの取得上限
+MAX_LINKS = 150              # 通常のリンク結果の取得上限
+MAX_IMAGES = 150             # 一覧ページから拾う画像の取得上限
+MAX_VIEWKEY_LINKS = 150      # viewkeyリンクの取得上限
 
 MIN_LINK_TEXT_LEN = 4       # 簡易抽出時、これより短いテキストのリンクは除外
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
@@ -219,6 +219,22 @@ def find_viewkey_links(soup: BeautifulSoup, base_url: str) -> List[str]:
     return urls
 
 
+def _decode_js_string(value: str) -> str:
+    """
+    正規表現で抜き出した文字列の中に残っている、
+    \\uXXXX(Unicodeエスケープ)や \\/ などのJS文字列エスケープをデコードする。
+    """
+    try:
+        decoded = value.encode("utf-8").decode("unicode_escape")
+    except (UnicodeDecodeError, UnicodeEncodeError):
+        # デコードに失敗した場合は元の文字列をそのまま使う(壊さない)
+        decoded = value
+
+    # \/ は unicode_escape では変換されないので個別に置換する
+    decoded = decoded.replace("\\/", "/")
+    return decoded
+
+
 def _parse_flashvars(html_text: str) -> dict:
     """HTML中の 'var flashvars_XXXXX = {...};' を dict として取り出す。"""
     match = FLASHVARS_BLOCK_RE.search(html_text)
@@ -227,7 +243,8 @@ def _parse_flashvars(html_text: str) -> dict:
 
     result = {}
     for m in re.finditer(r'["\']([\w]+)["\']\s*:\s*["\']([^"\']*)["\']', match.group(1)):
-        result[m.group(1)] = m.group(2)
+        key, value = m.group(1), m.group(2)
+        result[key] = _decode_js_string(value)
     return result
 
 
