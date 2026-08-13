@@ -264,7 +264,7 @@ async def search_command(interaction: discord.Interaction, site: str, query: str
     await interaction.response.defer(ephemeral=True)
 
     try:
-        response = scraper.search(
+        response = await scraper.search(
             url_template=site_conf["url_template"],
             query=query,
             selector=site_conf.get("selector"),
