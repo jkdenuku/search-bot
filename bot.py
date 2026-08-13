@@ -182,7 +182,7 @@ async def search_command(interaction: discord.Interaction, site: str, query: str
     await interaction.response.defer()
 
     try:
-        results = scraper.search(
+        response = scraper.search(
             url_template=site_conf["url_template"],
             query=query,
             selector=site_conf.get("selector"),
@@ -191,20 +191,32 @@ async def search_command(interaction: discord.Interaction, site: str, query: str
         await interaction.followup.send(f"検索中にエラーが発生しました: `{e}`")
         return
 
-    if not results:
+    links = response.links
+    images = response.images
+
+    if not links and not images:
         await interaction.followup.send(f"「{query}」の検索結果が見つかりませんでした。(サイト: {site})")
         return
 
-    embed = discord.Embed(
-        title=f"「{query}」の検索結果 — {site}",
-        color=discord.Color.blue(),
-    )
-    for r in results:
-        # embed.description の1フィールドあたりの文字数制限に配慮し、タイトルを短縮
-        title = r.title if len(r.title) <= 100 else r.title[:97] + "..."
-        embed.add_field(name=title, value=r.url, inline=False)
+    # --- リンク結果(最大5件)を1つのembedで表示 ---
+    if links:
+        embed = discord.Embed(
+            title=f"「{query}」の検索結果 — {site}",
+            color=discord.Color.blue(),
+        )
+        for r in links:
+            title = r.title if len(r.title) <= 100 else r.title[:97] + "..."
+            embed.add_field(name=title, value=r.url, inline=False)
+        await interaction.followup.send(embed=embed)
 
-    await interaction.followup.send(embed=embed)
+    # --- 画像結果(最大5件)を1枚ずつ別embedで連続投稿 ---
+    for i, image_url in enumerate(images, start=1):
+        image_embed = discord.Embed(
+            title=f"関連画像 {i}/{len(images)}",
+            color=discord.Color.green(),
+        )
+        image_embed.set_image(url=image_url)
+        await interaction.followup.send(embed=image_embed)
 
 
 @search_command.autocomplete("site")
