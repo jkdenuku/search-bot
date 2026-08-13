@@ -25,9 +25,11 @@ USER_AGENT = (
 REQUEST_TIMEOUT = 10
 MAX_RESULTS = 5
 MAX_IMAGES = 5
+MAX_VIEWKEY_LINKS = 5
 MIN_LINK_TEXT_LEN = 4  # 簡易抽出時、これより短いテキストのリンクは除外
 
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg")
+VIEWKEY_MARKER = "viewkey="
 
 
 @dataclass
@@ -40,6 +42,7 @@ class SearchResult:
 class SearchResponse:
     links: List[SearchResult]
     images: List[str]
+    viewkey_links: List[SearchResult]
 
 
 def build_search_url(url_template: str, query: str) -> str:
@@ -161,10 +164,41 @@ def _extract_images(soup: BeautifulSoup, base_url: str) -> List[str]:
     return images
 
 
+def _extract_viewkey_links(soup: BeautifulSoup, base_url: str) -> List[SearchResult]:
+    """
+    ページ内の全リンクから、URLに 'viewkey=' を含むものだけを最大MAX_VIEWKEY_LINKS件抽出する。
+    (例: 動画ページなど特定パラメータを含むURLだけを拾いたい場合に使用)
+    """
+    results: List[SearchResult] = []
+    seen_urls = set()
+
+    for a_tag in soup.find_all("a", href=True):
+        href = a_tag["href"]
+
+        if VIEWKEY_MARKER not in href:
+            continue
+
+        full_url = _resolve_url(base_url, href)
+        if VIEWKEY_MARKER not in full_url:
+            continue
+        if full_url in seen_urls:
+            continue
+        seen_urls.add(full_url)
+
+        title = a_tag.get_text(strip=True) or full_url
+        results.append(SearchResult(title=title, url=full_url))
+
+        if len(results) >= MAX_VIEWKEY_LINKS:
+            break
+
+    return results
+
+
 def search(url_template: str, query: str, selector: Optional[str] = None) -> SearchResponse:
     """
-    サイト内検索を実行し、リンク結果(最大MAX_RESULTS件)と
-    画像URL(最大MAX_IMAGES件)をまとめて返す。
+    サイト内検索を実行し、リンク結果(最大MAX_RESULTS件)、
+    画像URL(最大MAX_IMAGES件)、viewkey=を含むリンク(最大MAX_VIEWKEY_LINKS件)を
+    まとめて返す。
     ネットワークエラーやパース失敗時は例外を投げる(呼び出し側でハンドリング)。
     """
     search_url = build_search_url(url_template, query)
@@ -187,5 +221,6 @@ def search(url_template: str, query: str, selector: Optional[str] = None) -> Sea
         links = _extract_generic(soup, search_url)
 
     images = _extract_images(soup, search_url)
+    viewkey_links = _extract_viewkey_links(soup, search_url)
 
-    return SearchResponse(links=links, images=images)
+    return SearchResponse(links=links, images=images, viewkey_links=viewkey_links)
