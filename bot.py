@@ -193,8 +193,9 @@ async def search_command(interaction: discord.Interaction, site: str, query: str
 
     links = response.links
     images = response.images
+    viewkey_links = response.viewkey_links
 
-    if not links and not images:
+    if not links and not images and not viewkey_links:
         await interaction.followup.send(f"「{query}」の検索結果が見つかりませんでした。(サイト: {site})")
         return
 
@@ -208,6 +209,17 @@ async def search_command(interaction: discord.Interaction, site: str, query: str
             title = r.title if len(r.title) <= 100 else r.title[:97] + "..."
             embed.add_field(name=title, value=r.url, inline=False)
         await interaction.followup.send(embed=embed)
+
+    # --- viewkey= を含むリンク(最大5件)を専用embedで表示 ---
+    if viewkey_links:
+        viewkey_embed = discord.Embed(
+            title=f"viewkey付きリンク — {site}",
+            color=discord.Color.orange(),
+        )
+        for r in viewkey_links:
+            title = r.title if len(r.title) <= 100 else r.title[:97] + "..."
+            viewkey_embed.add_field(name=title, value=r.url, inline=False)
+        await interaction.followup.send(embed=viewkey_embed)
 
     # --- 画像結果(最大5件)を1枚ずつ別embedで連続投稿 ---
     for i, image_url in enumerate(images, start=1):
