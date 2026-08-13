@@ -35,19 +35,17 @@ USER_AGENT = (
 
 REQUEST_HEADERS = {
     "User-Agent": USER_AGENT,
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
 }
 
 REQUEST_TIMEOUT = 10          # 検索結果ページ取得のタイムアウト(秒)
 DETAIL_TIMEOUT = 8            # viewkey詳細ページ取得のタイムアウト(秒)
 DETAIL_CONCURRENCY = 8        # viewkey詳細ページに同時アクセスする数
-DETAIL_FETCH_LIMIT = 30       # viewkey詳細ページを個別取得する最大件数(重くなりすぎ防止)
+DETAIL_FETCH_LIMIT = 10       # viewkey詳細ページを個別取得する最大件数(重くなりすぎ防止)
 
-MAX_LINKS = 150                # 通常のリンク結果の最大件数
-MAX_IMAGES = 150               # 一覧ページから拾う画像の最大件数
-MAX_VIEWKEY_LINKS = 150        # viewkeyリンクの最大件数
-RESULTS_PER_PAGE = 5           # Discord表示時、1ページあたりの件数
+MAX_LINKS = 30                 # 通常のリンク結果の取得上限(表示は5件のみ使用)
+MAX_IMAGES = 10                 # 一覧ページから拾う画像の取得上限(表示は5件のみ使用)
+MAX_VIEWKEY_LINKS = 10           # viewkeyリンクの取得上限(表示は5件のみ使用)
+RESULTS_PER_PAGE = 5           # (未使用: 互換性のため残置)
 
 MIN_LINK_TEXT_LEN = 4          # 簡易抽出時、これより短いテキストのリンクは除外
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
