@@ -9,11 +9,13 @@
   テキストがある程度の長さを持つものを結果候補として返す(簡易版)
 """
 
+import asyncio
 import re
 import urllib.parse
 from dataclasses import dataclass
 from typing import List, Optional
 
+import aiohttp
 import requests
 from bs4 import BeautifulSoup
 
@@ -24,6 +26,9 @@ USER_AGENT = (
 )
 
 REQUEST_TIMEOUT = 10
+DETAIL_PAGE_TIMEOUT = 8
+DETAIL_FETCH_CONCURRENCY = 8  # 詳細ページに同時アクセスする最大数
+DETAIL_FETCH_LIMIT = 30  # 詳細ページへの個別アクセスを行う最大件数(重くなりすぎないための上限)
 MAX_RESULTS = 150
 MAX_IMAGES = 150
 MAX_VIEWKEY_LINKS = 150
@@ -35,6 +40,9 @@ VIEWKEY_MARKER = "viewkey="
 
 # flashvars_XXXXX = { ... }; ブロックを検出する正規表現
 FLASHVARS_BLOCK_RE = re.compile(r"var\s+flashvars_\w+\s*=\s*(\{.*?\});", re.DOTALL)
+
+# タイトルとして使う候補キー(見つかった順に採用)
+TITLE_KEYS = ("video_title", "title", "video_name")
 
 
 @dataclass
@@ -185,25 +193,22 @@ def _parse_flashvars(html_text: str) -> dict:
     """
     HTMLソース中の 'var flashvars_XXXXX = { ... };' ブロックを探し、
     中身をざっくり dict として取り出す(厳密なJSではないため正規表現で個別キーを拾う)。
-    一覧ページ内に複数のflashvarsブロックがある場合は、すべてマージする。
     """
+    match = FLASHVARS_BLOCK_RE.search(html_text)
+    if not match:
+        return {}
+
+    block = match.group(1)
     result = {}
-    for match in FLASHVARS_BLOCK_RE.finditer(html_text):
-        block = match.group(1)
-        for m in re.finditer(r'["\']([\w]+)["\']\s*:\s*["\']([^"\']*)["\']', block):
-            key, value = m.group(1), m.group(2)
-            result[key] = value
+    for m in re.finditer(r'["\']([\w]+)["\']\s*:\s*["\']([^"\']*)["\']', block):
+        key, value = m.group(1), m.group(2)
+        result[key] = value
     return result
 
 
-def _extract_viewkey_links(soup: BeautifulSoup, base_url: str) -> List[SearchResult]:
-    """
-    ページ内の全リンクから、URLに 'viewkey=' を含むものだけを最大MAX_VIEWKEY_LINKS件抽出する。
-    サムネイルは一覧ページ内(リンクの親要素付近)にある<img>タグ、または
-    ページ内のflashvarsブロックから、キー名に関わらず画像URLを拾って割り当てる。
-    詳細ページへの個別アクセスは行わない(一覧ページ内の情報だけで完結させる)。
-    """
-    results: List[SearchResult] = []
+def _collect_viewkey_candidates(soup: BeautifulSoup, base_url: str) -> List[tuple]:
+    """検索結果ページ内から、viewkey= を含むリンクのURLとフォールバック用テキストを集める。"""
+    candidates: List[tuple] = []  # (url, fallback_title)
     seen_urls = set()
 
     for a_tag in soup.find_all("a", href=True):
@@ -219,43 +224,100 @@ def _extract_viewkey_links(soup: BeautifulSoup, base_url: str) -> List[SearchRes
             continue
         seen_urls.add(full_url)
 
-        title = a_tag.get_text(strip=True) or full_url
+        fallback_title = a_tag.get_text(strip=True) or None
+        candidates.append((full_url, fallback_title))
 
-        # このリンク要素自身、または近くの親要素の中にある<img>を探す
-        thumbnail = None
-        img_tag = a_tag.find("img")
-        if img_tag is None:
-            parent = a_tag.parent
-            if parent is not None:
-                img_tag = parent.find("img")
-        if img_tag is not None:
-            src = img_tag.get("src") or img_tag.get("data-src")
-            if src:
-                thumbnail = _resolve_url(base_url, src)
-
-        results.append(SearchResult(title=title, url=full_url, thumbnail=thumbnail))
-
-        if len(results) >= MAX_VIEWKEY_LINKS:
+        if len(candidates) >= MAX_VIEWKEY_LINKS:
             break
 
-    # 画像が見つからなかったviewkeyリンクには、ページ内flashvarsから拾えた画像を補完する
-    missing = [r for r in results if not r.thumbnail]
-    if missing:
-        flashvars = _parse_flashvars(str(soup))
-        fallback_image = _find_image_url_in_flashvars(flashvars)
-        if fallback_image:
-            fallback_image = _resolve_url(base_url, fallback_image)
-            for r in missing:
-                r.thumbnail = fallback_image
+    return candidates
+
+
+async def _fetch_one_detail(session: "aiohttp.ClientSession", url: str, semaphore: "asyncio.Semaphore") -> tuple:
+    """
+    viewkey= を含む1ページに個別アクセスし、flashvars からタイトルとサムネイルを取得する。
+    (title, thumbnail) を返す。取れなければ (None, None)。
+    """
+    async with semaphore:
+        try:
+            async with session.get(
+                url,
+                headers={"User-Agent": USER_AGENT},
+                timeout=aiohttp.ClientTimeout(total=DETAIL_PAGE_TIMEOUT),
+            ) as resp:
+                if resp.status != 200:
+                    return None, None
+                html_text = await resp.text(errors="ignore")
+        except Exception:
+            return None, None
+
+    flashvars = _parse_flashvars(html_text)
+    if not flashvars:
+        return None, None
+
+    title = None
+    for key in TITLE_KEYS:
+        if flashvars.get(key):
+            title = flashvars[key]
+            break
+
+    thumbnail = _find_image_url_in_flashvars(flashvars)
+    if thumbnail:
+        thumbnail = _resolve_url(url, thumbnail)
+
+    return title, thumbnail
+
+
+async def _fetch_viewkey_details(candidates: List[tuple]) -> List[SearchResult]:
+    """
+    viewkeyリンク候補それぞれに個別アクセスし、そのリンク自身のタイトル・サムネイルを取得する。
+    リンクと画像・タイトルが必ず1対1で対応するようにする。
+    """
+    semaphore = asyncio.Semaphore(DETAIL_FETCH_CONCURRENCY)
+
+    async with aiohttp.ClientSession() as session:
+        tasks = [_fetch_one_detail(session, url, semaphore) for url, _ in candidates]
+        fetched = await asyncio.gather(*tasks)
+
+    results: List[SearchResult] = []
+    for (url, fallback_title), (title, thumbnail) in zip(candidates, fetched):
+        results.append(SearchResult(
+            title=title or fallback_title or url,
+            url=url,
+            thumbnail=thumbnail,
+        ))
+    return results
+
+
+def _extract_viewkey_links(soup: BeautifulSoup, base_url: str) -> List[SearchResult]:
+    """
+    ページ内の全リンクから、URLに 'viewkey=' を含むものだけを最大MAX_VIEWKEY_LINKS件抽出し、
+    そのうち先頭DETAIL_FETCH_LIMIT件について、それぞれのページに個別アクセスして
+    そのリンク自身のタイトル・サムネイルを取得する。
+    (リンクと画像・タイトルが必ず1対1で対応するようにするため、使い回しはしない)
+    残りの件数は、検索結果ページ上のリンクテキストのみをタイトルとして使う(画像なし)。
+    """
+    candidates = _collect_viewkey_candidates(soup, base_url)
+    if not candidates:
+        return []
+
+    detail_targets = candidates[:DETAIL_FETCH_LIMIT]
+    remaining = candidates[DETAIL_FETCH_LIMIT:]
+
+    results = asyncio.run(_fetch_viewkey_details(detail_targets))
+
+    for url, fallback_title in remaining:
+        results.append(SearchResult(title=fallback_title or url, url=url, thumbnail=None))
 
     return results
 
 
 def search(url_template: str, query: str, selector: Optional[str] = None) -> SearchResponse:
     """
-    サイト内検索を実行し、検索結果ページ1枚分から、
-    リンク結果・画像URL・viewkey=を含むリンクを最大150件ずつ取得する。
-    次のページへのアクセスは行わない(検索結果ページ内の情報のみ使用)。
+    サイト内検索を実行し、検索結果ページ1枚分から、リンク結果・画像URLを取得する。
+    viewkey= を含むリンクについては、各ページに個別・並行アクセスして
+    'var flashvars_XXXXX = {...};' からそのリンク自身のタイトルとサムネイルを取得する
+    (リンクごとに個別取得するため、画像やタイトルが別のリンクのものと混ざることはない)。
     ネットワークエラーやパース失敗時は例外を投げる(呼び出し側でハンドリング)。
     """
     search_url = build_search_url(url_template, query)
