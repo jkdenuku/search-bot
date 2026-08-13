@@ -210,16 +210,19 @@ async def search_command(interaction: discord.Interaction, site: str, query: str
             embed.add_field(name=title, value=r.url, inline=False)
         await interaction.followup.send(embed=embed)
 
-    # --- viewkey= を含むリンク(最大5件)を専用embedで表示 ---
-    if viewkey_links:
-        viewkey_embed = discord.Embed(
-            title=f"viewkey付きリンク — {site}",
+    # --- viewkey= を含むリンク(最大5件)を専用embedで、タイトル・サムネイル付きで表示 ---
+    for i, r in enumerate(viewkey_links, start=1):
+        title = r.title if len(r.title) <= 256 else r.title[:253] + "..."
+        vk_embed = discord.Embed(
+            title=title,
+            url=r.url,
+            description=r.url,
             color=discord.Color.orange(),
         )
-        for r in viewkey_links:
-            title = r.title if len(r.title) <= 100 else r.title[:97] + "..."
-            viewkey_embed.add_field(name=title, value=r.url, inline=False)
-        await interaction.followup.send(embed=viewkey_embed)
+        if r.thumbnail:
+            vk_embed.set_thumbnail(url=r.thumbnail)
+        vk_embed.set_footer(text=f"{i}/{len(viewkey_links)} — {site}")
+        await interaction.followup.send(embed=vk_embed)
 
     # --- 画像結果(最大5件)を1枚ずつ別embedで連続投稿 ---
     for i, image_url in enumerate(images, start=1):
