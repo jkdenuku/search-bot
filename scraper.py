@@ -12,15 +12,16 @@
    'var flashvars_XXXXX = {...};' からタイトル(video_title)と
    画像URL(.jpg等で終わる値)を取得する
    → viewkey= を含むサイトを使っていない場合、この処理は何もしない(空リストを返す)
+
+すべて requests による同期処理。呼び出し側(bot.py)は同期関数として scraper.search() を呼ぶ。
 """
 
-import asyncio
 import re
 import urllib.parse
 from dataclasses import dataclass
 from typing import List, Optional
 
-import aiohttp
+import requests
 from bs4 import BeautifulSoup
 
 # ---------------------------------------------------------------------
@@ -33,21 +34,15 @@ USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
-REQUEST_HEADERS = {
-    "User-Agent": USER_AGENT,
-}
+REQUEST_TIMEOUT = 10       # 検索結果ページ取得のタイムアウト(秒)
+DETAIL_TIMEOUT = 8         # viewkey詳細ページ取得のタイムアウト(秒)
+DETAIL_FETCH_LIMIT = 5     # viewkey詳細ページを個別取得する最大件数(表示件数と合わせる)
 
-REQUEST_TIMEOUT = 10          # 検索結果ページ取得のタイムアウト(秒)
-DETAIL_TIMEOUT = 8            # viewkey詳細ページ取得のタイムアウト(秒)
-DETAIL_CONCURRENCY = 8        # viewkey詳細ページに同時アクセスする数
-DETAIL_FETCH_LIMIT = 10       # viewkey詳細ページを個別取得する最大件数(重くなりすぎ防止)
+MAX_LINKS = 30              # 通常のリンク結果の取得上限(表示は5件のみ使用)
+MAX_IMAGES = 10              # 一覧ページから拾う画像の取得上限(表示は5件のみ使用)
+MAX_VIEWKEY_LINKS = 5        # viewkeyリンクの取得上限
 
-MAX_LINKS = 30                 # 通常のリンク結果の取得上限(表示は5件のみ使用)
-MAX_IMAGES = 10                 # 一覧ページから拾う画像の取得上限(表示は5件のみ使用)
-MAX_VIEWKEY_LINKS = 10           # viewkeyリンクの取得上限(表示は5件のみ使用)
-RESULTS_PER_PAGE = 5           # (未使用: 互換性のため残置)
-
-MIN_LINK_TEXT_LEN = 4          # 簡易抽出時、これより短いテキストのリンクは除外
+MIN_LINK_TEXT_LEN = 4       # 簡易抽出時、これより短いテキストのリンクは除外
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
 VIEWKEY_MARKER = "viewkey="
 
@@ -98,18 +93,6 @@ def _resolve_url(base_url: str, href: str) -> str:
 def _is_image_url(url: str) -> bool:
     path = urllib.parse.urlparse(url).path.lower()
     return path.endswith(IMAGE_EXTENSIONS)
-
-
-async def _fetch_html(session: aiohttp.ClientSession, url: str, timeout: int) -> str:
-    """指定URLのHTMLを取得する。ステータスエラー時は例外を投げる。"""
-    async with session.get(
-        url,
-        headers=REQUEST_HEADERS,
-        timeout=aiohttp.ClientTimeout(total=timeout),
-        allow_redirects=True,
-    ) as resp:
-        resp.raise_for_status()
-        return await resp.text(errors="ignore")
 
 
 # ---------------------------------------------------------------------
@@ -263,19 +246,21 @@ def _image_from_flashvars(flashvars: dict) -> Optional[str]:
     return None
 
 
-async def _fetch_video_detail(
-    session: aiohttp.ClientSession, url: str, semaphore: asyncio.Semaphore
-) -> VideoResult:
+def _fetch_video_detail(url: str) -> VideoResult:
     """
     1件のviewkeyリンクを開き、flashvarsからタイトルと画像URLを取得する。
-    取得に失敗した場合でも、タイトルはURLをそのまま使ってVideoResultを返す
-    (呼び出し側で「取得できなかった」ことが分かるよう例外にはしない)。
+    取得に失敗した場合でも、タイトルはURLをそのまま使ってVideoResultを返す。
     """
-    async with semaphore:
-        try:
-            html_text = await _fetch_html(session, url, DETAIL_TIMEOUT)
-        except Exception:
-            return VideoResult(title=url, url=url, thumbnail=None)
+    try:
+        response = requests.get(
+            url,
+            headers={"User-Agent": USER_AGENT},
+            timeout=DETAIL_TIMEOUT,
+        )
+        response.raise_for_status()
+        html_text = response.text
+    except requests.RequestException:
+        return VideoResult(title=url, url=url, thumbnail=None)
 
     flashvars = _parse_flashvars(html_text)
     title = _title_from_flashvars(flashvars) or url
@@ -286,35 +271,23 @@ async def _fetch_video_detail(
     return VideoResult(title=title, url=url, thumbnail=thumbnail)
 
 
-async def fetch_video_details(viewkey_urls: List[str]) -> List[VideoResult]:
+def fetch_video_details(viewkey_urls: List[str]) -> List[VideoResult]:
     """
     viewkeyリンクのURLリストを受け取り、それぞれ個別にページを開いて
-    タイトル・サムネイルを取得する。DETAIL_FETCH_LIMIT件を超える分は
-    詳細取得を行わず、URLをタイトルとして返す(重くなりすぎるのを防ぐため)。
+    タイトル・サムネイルを取得する(1件ずつ順番に処理)。
     """
     if not viewkey_urls:
         return []
 
     targets = viewkey_urls[:DETAIL_FETCH_LIMIT]
-    remaining = viewkey_urls[DETAIL_FETCH_LIMIT:]
-
-    semaphore = asyncio.Semaphore(DETAIL_CONCURRENCY)
-    async with aiohttp.ClientSession() as session:
-        tasks = [_fetch_video_detail(session, url, semaphore) for url in targets]
-        results = await asyncio.gather(*tasks)
-
-    results = list(results)
-    for url in remaining:
-        results.append(VideoResult(title=url, url=url, thumbnail=None))
-
-    return results
+    return [_fetch_video_detail(url) for url in targets]
 
 
 # ---------------------------------------------------------------------
 # メイン処理
 # ---------------------------------------------------------------------
 
-async def search(url_template: str, query: str, selector: Optional[str] = None) -> SearchResponse:
+def search(url_template: str, query: str, selector: Optional[str] = None) -> SearchResponse:
     """
     サイト内検索を実行する。
 
@@ -323,18 +296,23 @@ async def search(url_template: str, query: str, selector: Optional[str] = None) 
     3. viewkey= を含むリンクがあれば、それぞれ個別に開いてタイトル・サムネイルを取得
 
     ネットワークエラー(接続失敗・404・410など)は例外として呼び出し側に伝える。
+    同期関数なので、呼び出し側で await は不要。
     """
     search_url = build_search_url(url_template, query)
 
-    async with aiohttp.ClientSession() as session:
-        html_text = await _fetch_html(session, search_url, REQUEST_TIMEOUT)
+    response = requests.get(
+        search_url,
+        headers={"User-Agent": USER_AGENT},
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
 
-    soup = BeautifulSoup(html_text, "html.parser")
+    soup = BeautifulSoup(response.text, "html.parser")
 
     links = extract_links(soup, search_url, selector)
     images = extract_page_images(soup, search_url)
 
     viewkey_urls = find_viewkey_links(soup, search_url)
-    videos = await fetch_video_details(viewkey_urls) if viewkey_urls else []
+    videos = fetch_video_details(viewkey_urls) if viewkey_urls else []
 
     return SearchResponse(links=links, images=images, videos=videos)
