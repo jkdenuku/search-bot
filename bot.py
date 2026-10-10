@@ -176,6 +176,7 @@ bot.tree.add_command(setting_group)
 # ---------------------------------------------------------------------
 
 DISPLAY_LIMIT = 150          # 各カテゴリの表示件数上限
+SEND_INTERVAL = 0.5          # 結果を1通送るごとに空ける間隔(秒)。レート制限対策
 LINKS_PER_EMBED = 15         # リンク一覧embed 1通あたりに詰め込む件数(文字数制限対策)
 
 
@@ -262,6 +263,7 @@ async def search_command(interaction: discord.Interaction, site: str, query: str
     # --- 1. 通常のリンク結果(最大150件)を表形式でまとめて表示 ---
     for embed in _build_links_table_embeds(query, site, links):
         await interaction.followup.send(embed=embed, ephemeral=True)
+        await asyncio.sleep(SEND_INTERVAL)
 
     # --- 2. viewkey動画(最大150件)を1件ずつ、タイトル・サムネイル付きで表示 ---
     for i, v in enumerate(videos, start=1):
@@ -276,6 +278,7 @@ async def search_command(interaction: discord.Interaction, site: str, query: str
             video_embed.set_thumbnail(url=v.thumbnail)
         video_embed.set_footer(text=f"{i}/{len(videos)} — {site}")
         await interaction.followup.send(embed=video_embed, ephemeral=True)
+        await asyncio.sleep(SEND_INTERVAL)
 
     # --- 3. 画像(最大150件)を1枚ずつ表示 ---
     for i, image_url in enumerate(images, start=1):
@@ -285,6 +288,7 @@ async def search_command(interaction: discord.Interaction, site: str, query: str
         )
         image_embed.set_image(url=image_url)
         await interaction.followup.send(embed=image_embed, ephemeral=True)
+        await asyncio.sleep(SEND_INTERVAL)
 
 
 @search_command.autocomplete("site")
