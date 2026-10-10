@@ -304,8 +304,24 @@ async def main():
 
     # ヘルスチェック用サーバーとDiscord Botを同時に起動する
     await run_web_server()
-    async with bot:
-        await bot.start(token)
+
+    # ログインに失敗(429/Cloudflareブロック等)しても即クラッシュせず、
+    # 長めに待ってから再試行する。即クラッシュ→Render再起動を繰り返すと
+    # ブロックがさらに長引くため、プロセスは生かしたまま待つ。
+    wait_seconds = 300  # 最初は5分待つ
+    while True:
+        try:
+            async with bot:
+                await bot.start(token)
+            break
+        except discord.HTTPException as e:
+            print(f"Discordへの接続に失敗しました (HTTP {e.status})。{wait_seconds}秒後に再試行します")
+        except Exception as e:
+            print(f"起動中にエラーが発生しました: {type(e).__name__}: {e}。{wait_seconds}秒後に再試行します")
+
+        await asyncio.sleep(wait_seconds)
+        wait_seconds = min(wait_seconds * 2, 1800)  # 最大30分まで延ばす
+        bot.clear()  # 一度closeしたbotを再利用できる状態に戻す
 
 
 if __name__ == "__main__":
