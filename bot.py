@@ -24,6 +24,7 @@
 """
 
 import os
+import sys
 import asyncio
 
 from aiohttp import web
@@ -34,6 +35,10 @@ from discord.ext import commands
 
 import storage
 import scraper
+
+# Renderのログに print の内容がすぐ出るようにする
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
 
 INTENTS = discord.Intents.default()
 
@@ -302,8 +307,12 @@ async def main():
             "export DISCORD_BOT_TOKEN=\"your-token-here\" を実行してから再度起動してください。"
         )
 
+    # discord.py自身のログ(ログイン状況・レート制限など)をRenderのLogsに出す
+    discord.utils.setup_logging(level=20)
+
     # ヘルスチェック用サーバーとDiscord Botを同時に起動する
     await run_web_server()
+    print("Discordへログインを開始します...")
 
     # ログインに失敗(429/Cloudflareブロック等)しても即クラッシュせず、
     # 長めに待ってから再試行する。即クラッシュ→Render再起動を繰り返すと
